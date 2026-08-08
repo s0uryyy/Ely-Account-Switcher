@@ -135,8 +135,7 @@ public final class MSAuth {
                 String body = response.body();
                 
                 if (status != HttpURLConnection.HTTP_OK) {
-                    IAS.LOGGER.error("[Ely.by] Token exchange failed. Status: {}, Body: {}", status, body);
-                    throw new FriendlyException("Failed to login with Ely.by", "ias.error.elyby.token");
+                    throw new FriendlyException("Failed to login with Ely.by (status " + status + ")", "ias.error.elyby.token");
                 }
                 
                 JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
@@ -152,7 +151,6 @@ public final class MSAuth {
                 
                 return MSTokens.fromJson(mapped);
             } catch (Throwable t) {
-                IAS.LOGGER.error("[Ely.by] Failed to parse token response", t);
                 throw new RuntimeException("Unable to exchange Ely.by OAuth2 code.", t);
             }
         }, IAS.executor());
@@ -178,14 +176,12 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
-                String body = response.body();
                 
                 if (status != HttpURLConnection.HTTP_OK) {
-                    IAS.LOGGER.warn("[Ely.by] Token refresh failed. Status: {}", status);
                     throw new FriendlyException("Ely.by session expired.", "ias.error.session");
                 }
                 
-                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
                 Objects.requireNonNull(json, "Ely.by refresh response is null");
 
                 JsonObject mapped = new JsonObject();
@@ -194,7 +190,6 @@ public final class MSAuth {
                 
                 return MSTokens.fromJson(mapped);
             } catch (Throwable t) {
-                IAS.LOGGER.error("[Ely.by] Failed to refresh token", t);
                 throw new RuntimeException("Unable to refresh Ely.by OAuth2 token.", t);
             }
         }, IAS.executor());
@@ -215,14 +210,12 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
-                String body = response.body();
                 
                 if (status != HttpURLConnection.HTTP_OK) {
-                    IAS.LOGGER.error("[Ely.by] Failed to fetch account info. Status: {}, Body: {}", status, body);
-                    throw new FriendlyException("Failed to get Ely.by profile", "ias.error.elyby.profile");
+                    throw new FriendlyException("Failed to get Ely.by profile (status " + status + ")", "ias.error.elyby.profile");
                 }
                 
-                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
                 Objects.requireNonNull(json, "Ely.by account info is null");
                 
                 // Ely.by returns: { "uuid": "...", "username": "...", ... }
@@ -234,11 +227,8 @@ public final class MSAuth {
                 profile.addProperty("id", uuid.replace("-", "")); // Remove dashes from UUID
                 profile.addProperty("name", username);
                 
-                IAS.LOGGER.info("[Ely.by] Logged in as: {} ({})", username, uuid);
-                
                 return MCProfile.fromJson(profile);
             } catch (Throwable t) {
-                IAS.LOGGER.error("[Ely.by] Failed to parse account info", t);
                 throw new RuntimeException("Failed fetching profile from Ely.by.", t);
             }
         }, IAS.executor());
@@ -292,23 +282,20 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
-                String body = response.body();
                 
                 if (status == HttpURLConnection.HTTP_NO_CONTENT || status == HttpURLConnection.HTTP_NOT_FOUND) {
                     throw new FriendlyException("Ely.by profile not found: " + name, "ias.error.elyby.notfound");
                 }
                 
                 if (status != HttpURLConnection.HTTP_OK) {
-                    IAS.LOGGER.error("[Ely.by] Failed to resolve profile. Status: {}, Body: {}", status, body);
                     throw new IllegalArgumentException("Invalid profile status: " + status);
                 }
                 
-                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
                 Objects.requireNonNull(json, "Ely.by profile response is null");
                 
                 return MCProfile.fromJson(json);
             } catch (Throwable t) {
-                IAS.LOGGER.error("[Ely.by] Failed to resolve profile by name: {}", name, t);
                 throw new RuntimeException("Unable to resolve Ely.by profile by name: " + name, t);
             }
         }, IAS.executor());
