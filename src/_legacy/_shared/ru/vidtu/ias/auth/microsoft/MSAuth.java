@@ -1,5 +1,5 @@
 /*
- * In-Game Account Switcher with Ely.by OAuth2 patch.
+ * In-Game Account Switcher with Ely.by OAuth2 patch (Public Client Flow).
  */
 
 package ru.vidtu.ias.auth.microsoft;
@@ -29,13 +29,11 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * MSAuth rewritten to perform Ely.by OAuth2 Authentication.
+ * MSAuth rewritten to perform Ely.by OAuth2 Authentication (No Client Secret required).
  */
 public final class MSAuth {
-    // === ВСТАВЬ СВОИ ДАННЫЕ СЮДА ===
-    public static final String ELY_CLIENT_ID = "ВСТАВЬ_СЮДА_CLIENT_ID";
-    public static final String ELY_CLIENT_SECRET = "ВСТАВЬ_СЮДА_CLIENT_SECRET";
-    // ===============================
+    // Твой зарегистрированный публичный Client ID на Ely.by
+    public static final String ELY_CLIENT_ID = "ely-account-switcher";
 
     @NotNull
     private static final HttpClient CLIENT = HttpClient.newBuilder()
@@ -51,13 +49,12 @@ public final class MSAuth {
     }
 
     /**
-     * Exchanges Ely.by OAuth2 Authorization Code for access & refresh tokens.
+     * Exchanges Ely.by OAuth2 Authorization Code for access & refresh tokens (Public Client style).
      */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MSTokens> msacToMsaMsr(@NotNull String code, @NotNull String redirect) {
         String payload = "client_id=" + ELY_CLIENT_ID +
-                "&client_secret=" + ELY_CLIENT_SECRET +
                 "&grant_type=authorization_code" +
                 "&code=" + URLEncoder.encode(code, StandardCharsets.UTF_8) +
                 "&redirect_uri=" + URLEncoder.encode(redirect, StandardCharsets.UTF_8);
@@ -73,12 +70,11 @@ public final class MSAuth {
             try {
                 int status = response.statusCode();
                 if (status != HttpURLConnection.HTTP_OK) {
-                    throw new IllegalArgumentException("Invalid status code from Ely.by: " + status);
+                    throw new IllegalArgumentException("Invalid status code from Ely.by: " + status + ", body: " + response.body());
                 }
                 JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
                 Objects.requireNonNull(json, "Response is null");
 
-                // Map Ely.by keys directly to MSTokens structure
                 JsonObject dummy = new JsonObject();
                 dummy.addProperty("access_token", GSONUtils.getStringOrThrow(json, "access_token"));
                 dummy.addProperty("refresh_token", GSONUtils.getStringOrThrow(json, "refresh_token"));
@@ -90,13 +86,12 @@ public final class MSAuth {
     }
 
     /**
-     * Refreshes Ely.by OAuth2 Token.
+     * Refreshes Ely.by OAuth2 Token (Public Client style).
      */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MSTokens> msrToMsaMsr(@NotNull String refresh) {
         String payload = "client_id=" + ELY_CLIENT_ID +
-                "&client_secret=" + ELY_CLIENT_SECRET +
                 "&grant_type=refresh_token" +
                 "&refresh_token=" + URLEncoder.encode(refresh, StandardCharsets.UTF_8);
 
@@ -132,7 +127,6 @@ public final class MSAuth {
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MCProfile> mcaToMcp(@NotNull String access) {
-        // Step 1: Call Userinfo to get authenticated username
         return CLIENT.sendAsync(HttpRequest.newBuilder()
                 .uri(URI.create("https://ely.by/api/oauth2/v1/userinfo"))
                 .header("User-Agent", IAS.USER_AGENT)
@@ -149,7 +143,6 @@ public final class MSAuth {
                 Objects.requireNonNull(json, "Response is null");
                 String username = GSONUtils.getStringOrThrow(json, "username");
 
-                // Step 2: Resolve Minecraft UUID and correct nickname casing from Ely.by authserver
                 return CLIENT.sendAsync(HttpRequest.newBuilder()
                         .uri(URI.create("https://authserver.ely.by/api/users/profiles/minecraft/" + URLEncoder.encode(username, StandardCharsets.UTF_8)))
                         .header("User-Agent", IAS.USER_AGENT)
