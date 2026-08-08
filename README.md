@@ -1,8 +1,9 @@
 <img src="ias.png" alt="In-Game Account Switcher Icon" width=128 height=128/>
 
-# In-Game Account Switcher
+# Ely Account Switcher (fork of IAS)
 
-In-Game Account Switcher allows you to change which account you are logged in to in-game,
+
+Ely Account Switcher allows you to change which account you are logged in to in-game,
 without having to restart Minecraft.
 
 ## Dependencies
