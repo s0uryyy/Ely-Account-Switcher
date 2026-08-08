@@ -60,7 +60,7 @@ public final class MSAuth {
                 "&redirect_uri=" + URLEncoder.encode(redirect, StandardCharsets.UTF_8);
 
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://ely.by/oauth2/v1/token"))
+                .uri(URI.create("https://account.ely.by/oauth2/v1/token"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -96,7 +96,7 @@ public final class MSAuth {
                 "&refresh_token=" + URLEncoder.encode(refresh, StandardCharsets.UTF_8);
 
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://ely.by/oauth2/v1/token"))
+                .uri(URI.create("https://account.ely.by/oauth2/v1/token"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -128,7 +128,7 @@ public final class MSAuth {
     @NotNull
     public static CompletableFuture<MCProfile> mcaToMcp(@NotNull String access) {
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://ely.by/api/oauth2/v1/userinfo"))
+                .uri(URI.create("https://account.ely.by/api/oauth2/v1/userinfo"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Authorization", "Bearer " + access)
                 .timeout(IAS.TIMEOUT)
