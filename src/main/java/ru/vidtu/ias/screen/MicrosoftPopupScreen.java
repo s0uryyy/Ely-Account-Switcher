@@ -1,5 +1,5 @@
 /*
- * In-Game Account Switcher with Ely.by hijack patch.
+ * In-Game Account Switcher with Ely.by OAuth2 patch.
  */
 
 package ru.vidtu.ias.screen;
@@ -13,6 +13,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineLabel;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.resources.language.I18n;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
@@ -25,22 +26,21 @@ import ru.vidtu.ias.IAS;
 import ru.vidtu.ias.account.Account;
 import ru.vidtu.ias.account.MicrosoftAccount;
 import ru.vidtu.ias.auth.handlers.CreateHandler;
-import ru.vidtu.ias.auth.microsoft.MSAuth;
+import ru.vidtu.ias.auth.microsoft.MSAuthServer;
 import ru.vidtu.ias.config.IASConfig;
 import ru.vidtu.ias.crypt.Crypt;
 import ru.vidtu.ias.crypt.PasswordCrypt;
 import ru.vidtu.ias.platform.IStonecutter;
+import ru.vidtu.ias.utils.exceptions.FriendlyException;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * Ely.by account insertion popup mimicking MicrosoftAccount.
+ * Pop-up screen that launches local HTTP server and opens Ely.by login page.
  */
 final class MicrosoftPopupScreen extends Screen implements CreateHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("IAS/MicrosoftPopupScreen");
@@ -49,19 +49,13 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
     private final Object lock = new Object();
     private final Consumer<Account> handler;
     private Crypt crypt;
+    private MSAuthServer server;
 
-    private Component stage = Component.literal("Ely.by Login").withStyle(ChatFormatting.YELLOW);
+    private Component stage = Component.translatable(MicrosoftAccount.INITIALIZING).withStyle(ChatFormatting.YELLOW);
     private MultiLineLabel label;
 
-    private PopupBox password; // Master key
+    private PopupBox password;
     private MultiLineLabel cryptPasswordTip;
-
-    // Ely.by UI elements
-    private PopupBox elyEmail;
-    private PopupBox elyPassword;
-    private PopupBox elyTotp;
-    private Button elySubmit;
-
     private float error = Float.NaN;
     private MultiLineLabel errorNote;
 
@@ -81,7 +75,6 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
     @Override
     protected void init() {
         assert this.minecraft != null;
-
         synchronized (this.lock) {
             this.label = null;
         }
@@ -93,12 +86,10 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
             /*this.parent.init(this.minecraft, this.width, this.height);*/
         }
 
-        // Back button
         this.addRenderableWidget(new PopupButton(this.width / 2 - 75, this.height / 2 + 74 - 22, 150, 20,
                 CommonComponents.GUI_BACK, btn -> this.onClose(), Supplier::get));
 
         if (this.crypt == null) {
-            // Prompt Master password
             this.password = new PopupBox(this.font, this.width / 2 - 100, this.height / 2 - 10 + 5, 178, 20, this.password, Component.translatable("ias.password"), () -> {
                 if (this.password == null || this.crypt != null) return;
                 String value = this.password.getValue();
@@ -108,7 +99,6 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
                 this.password = null;
                 this.cryptPasswordTip = null;
 
-                // Re-init
                 //? if >=1.21.11 {
                 this.init(this.width, this.height);
                 //?} else
@@ -131,7 +121,6 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
                 this.password = null;
                 this.cryptPasswordTip = null;
 
-                // Re-init
                 //? if >=1.21.11 {
                 this.init(this.width, this.height);
                 //?} else
@@ -142,75 +131,38 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
             this.password.setResponder(value -> enterPassword.active = !value.isBlank());
 
             this.cryptPasswordTip = MultiLineLabel.create(this.font, Component.translatable("ias.password.tip"), 320);
-        } else {
-            // Master crypt exists: render Ely.by login form instead of MS browser / client code!
-            this.elyEmail = new PopupBox(this.font, this.width / 2 - 100, this.height / 2 - 50, 200, 20, this.elyEmail, Component.literal("Email / Nickname"), () -> {}, false);
-            this.elyEmail.setHint(Component.literal("Email / Nickname").withStyle(ChatFormatting.DARK_GRAY));
-            this.elyEmail.setMaxLength(128);
-            this.addRenderableWidget(this.elyEmail);
-
-            this.elyPassword = new PopupBox(this.font, this.width / 2 - 100, this.height / 2 - 20, 200, 20, this.elyPassword, Component.literal("Ely.by Password"), () -> {}, true);
-            this.elyPassword.setHint(Component.literal("Ely.by Password").withStyle(ChatFormatting.DARK_GRAY));
-            this.elyPassword.setMaxLength(128);
-            //? if >=1.21.10 {
-            this.elyPassword.addFormatter((s, i) -> FormattedCharSequence.forward("*".repeat(s.length()), Style.EMPTY));
-            //?} else
-            /*this.elyPassword.setFormatter((s, i) -> FormattedCharSequence.forward("*".repeat(s.length()), Style.EMPTY));*/
-            this.addRenderableWidget(this.elyPassword);
-
-            this.elyTotp = new PopupBox(this.font, this.width / 2 - 100, this.height / 2 + 10, 200, 20, this.elyTotp, Component.literal("2FA Code (Optional)"), () -> {}, false);
-            this.elyTotp.setHint(Component.literal("2FA Code (Optional)").withStyle(ChatFormatting.DARK_GRAY));
-            this.elyTotp.setMaxLength(6);
-            this.addRenderableWidget(this.elyTotp);
-
-            this.elySubmit = new PopupButton(this.width / 2 - 100, this.height / 2 + 40, 200, 20, Component.literal("Sign In"), btn -> this.submitElyBy(), Supplier::get);
-            this.addRenderableWidget(this.elySubmit);
-            this.stage("Login with Ely.by Account");
         }
+
+        IAS.executor().execute(this::server);
     }
 
-    private void submitElyBy() {
-        String email = this.elyEmail.getValue();
-        String pass = this.elyPassword.getValue();
-        String totp = this.elyTotp.getValue();
-        if (email.isBlank() || pass.isBlank()) return;
+    private void server() {
+        try {
+            assert this.minecraft != null;
+            if (this.crypt == null || this.server != null) return;
 
-        this.stage(MicrosoftAccount.PROCESSING);
-        this.elySubmit.active = false;
-
-        String clientToken = UUID.randomUUID().toString();
-
-        MSAuth.authenticateElyBy(email, pass, totp, clientToken).thenAcceptAsync(tokens -> {
-            try {
-                this.stage(MicrosoftAccount.ENCRYPTING);
-
-                byte[] unencrypted;
-                try (ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
-                     DataOutputStream out = new DataOutputStream(byteOut)) {
-                    out.writeUTF(tokens.access());
-                    out.writeUTF(tokens.refresh()); // accessToken:clientToken string saved as refresh
-                    unencrypted = byteOut.toByteArray();
-                }
-
-                byte[] encryptedData;
-                try (ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
-                     DataOutputStream out = new DataOutputStream(byteOut)) {
-                    byte[] encrypted = this.crypt.encrypt(unencrypted);
-                    out.writeUTF(this.crypt.type());
-                    out.write(encrypted);
-                    encryptedData = byteOut.toByteArray();
-                }
-
-                MicrosoftAccount account = new MicrosoftAccount(this.crypt.insecure(), tokens.profile().uuid(), tokens.profile().name(), encryptedData);
-                this.success(account);
-            } catch (Throwable t) {
-                this.error(new RuntimeException("Unable to encrypt Ely.by credentials", t));
+            // Use translation "ias.login.done" or fallback
+            String doneMessage = I18n.get("ias.login.done");
+            if (doneMessage.equals("ias.login.done")) {
+                doneMessage = "Success! You can now close this tab and return to Minecraft.";
             }
-        }, IAS.executor()).exceptionally(t -> {
-            this.error(t);
-            this.minecraft.execute(() -> this.elySubmit.active = true);
-            return null;
-        });
+
+            this.server = new MSAuthServer(doneMessage, this.crypt, this);
+
+            CompletableFuture.runAsync(() -> this.server.run(), IAS.executor()).thenRunAsync(() -> {
+                LOGGER.info("IAS: Opening Ely.by browser OAuth2 auth URL...");
+                this.stage(MicrosoftAccount.BROWSER);
+
+                String url = this.server.authUrl();
+                IStonecutter.openUrl(url);
+                this.minecraft.keyboardHandler.setClipboard(url);
+            }, this.minecraft).exceptionally(t -> {
+                this.error(new RuntimeException("Failed launching browser callback server", t));
+                return null;
+            });
+        } catch (Throwable t) {
+            this.error(new RuntimeException("Unable to setup login server.", t));
+        }
     }
 
     @Override
@@ -225,9 +177,17 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
         assert this.minecraft != null;
         KeyboardHandler keyboard = this.minecraft.keyboardHandler;
         String clipboard = keyboard.getClipboard();
+
         if (clipboard.toLowerCase(Locale.ROOT).contains(IAS.CLIENT_ID.toLowerCase(Locale.ROOT))) {
             keyboard.setClipboard(" ");
         }
+
+        IAS.executor().execute(() -> {
+            if (this.server != null) {
+                this.server.close();
+                this.server = null;
+            }
+        });
     }
 
     @SuppressWarnings("NonPrivateFieldAccessedInSynchronizedContext")
@@ -247,9 +207,9 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
         pose.pushMatrix();
         pose.scale(2.0F, 2.0F);
         //? if >=26.1 {
-        graphics.centeredText(this.font, this.title, this.width / 4, this.height / 4 - 74 / 2, 0xFF_FF_FF_FF);
+        graphics.centeredText(this.font, Component.literal("Ely.by Login"), this.width / 4, this.height / 4 - 74 / 2, 0xFF_FF_FF_FF);
         //?} else
-        /*graphics.drawCenteredString(this.font, this.title, this.width / 4, this.height / 4 - 74 / 2, 0xFF_FF_FF_FF);*/
+        /*graphics.drawCenteredString(this.font, Component.literal("Ely.by Login"), this.width / 4, this.height / 4 - 74 / 2, 0xFF_FF_FF_FF);*/
         pose.popMatrix();
 
         if (this.crypt == null && this.password != null && this.cryptPasswordTip != null) {
@@ -346,7 +306,13 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
         assert this.minecraft != null;
         if (this != this.currentScreen()) return;
 
-        Component component = Component.translatable(stage, args).withStyle(ChatFormatting.YELLOW);
+        Component component;
+        if (MicrosoftAccount.BROWSER.equals(stage)) {
+            component = Component.literal("Opening browser to authorize Ely.by...").withStyle(ChatFormatting.GREEN);
+        } else {
+            component = Component.translatable(stage, args).withStyle(ChatFormatting.YELLOW);
+        }
+
         synchronized (this.lock) {
             this.stage = component;
             this.label = null;
@@ -369,21 +335,17 @@ final class MicrosoftPopupScreen extends Screen implements CreateHandler {
     @Override
     public void error(Throwable error) {
         assert this.minecraft != null;
-        LOGGER.error("IAS: Ely.by auth error.", error);
+        LOGGER.error("IAS: Ely.by callback error.", error);
         if (this != this.currentScreen()) return;
 
-        String key = "ias.error";
-        Component component = Component.literal(error.getMessage() != null ? error.getMessage() : "Error: Check credentials").withStyle(ChatFormatting.RED);
+        FriendlyException probable = FriendlyException.friendlyInChain(error);
+        String key = probable != null ? probable.key() : "ias.error";
+        Component component = Component.translatable(key).withStyle(ChatFormatting.RED);
         synchronized (this.lock) {
             this.stage = component;
             this.label = null;
             this.error = 0.0F;
         }
-    }
-
-    @Override
-    public String toString() {
-        return "MicrosoftPopupScreen{elyByPatched=true}";
     }
 
     private Screen currentScreen() {
