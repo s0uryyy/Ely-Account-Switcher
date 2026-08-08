@@ -1,5 +1,5 @@
 /*
- * In-Game Account Switcher with Ely.by OAuth2 patch (Public Client Flow).
+ * In-Game Account Switcher with Ely.by OAuth2 patch (Public Client Flow with PKCE).
  */
 
 package ru.vidtu.ias.auth.microsoft;
@@ -25,15 +25,20 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * MSAuth rewritten to perform Ely.by OAuth2 Authentication (No Client Secret required).
+ * MSAuth rewritten to perform Ely.by OAuth2 Authentication with PKCE.
  */
 public final class MSAuth {
-    // Твой зарегистрированный публичный Client ID на Ely.by
     public static final String ELY_CLIENT_ID = "ely-account-switcher";
+    
+    // PKCE code verifier storage (thread-safe)
+    private static volatile String currentCodeVerifier;
 
     @NotNull
     private static final HttpClient CLIENT = HttpClient.newBuilder()
@@ -49,18 +54,76 @@ public final class MSAuth {
     }
 
     /**
-     * Exchanges Ely.by OAuth2 Authorization Code for access & refresh tokens (Public Client style).
+     * Generates PKCE code_verifier (random 43-128 character string).
+     * Must be called BEFORE generating authorization URL.
+     */
+    @NotNull
+    public static String generateCodeVerifier() {
+        SecureRandom sr = new SecureRandom();
+        byte[] code = new byte[32];
+        sr.nextBytes(code);
+        currentCodeVerifier = Base64.getUrlEncoder().withoutPadding().encodeToString(code);
+        return currentCodeVerifier;
+    }
+
+    /**
+     * Generates PKCE code_challenge from code_verifier using SHA-256.
+     */
+    @NotNull
+    public static String generateCodeChallenge(@NotNull String verifier) {
+        try {
+            byte[] bytes = verifier.getBytes(StandardCharsets.US_ASCII);
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            md.update(bytes);
+            byte[] digest = md.digest();
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate PKCE code challenge", e);
+        }
+    }
+
+    /**
+     * Builds Ely.by OAuth2 authorization URL with PKCE.
+     * Call this to get the URL to open in browser.
+     * 
+     * @param redirectUri Must match the URI registered in Ely.by app settings
+     * @return Full authorization URL
+     */
+    @NotNull
+    public static String getAuthorizationUrl(@NotNull String redirectUri) {
+        String verifier = generateCodeVerifier();
+        String challenge = generateCodeChallenge(verifier);
+        
+        return "https://account.ely.by/oauth2/v1?" +
+                "client_id=" + URLEncoder.encode(ELY_CLIENT_ID, StandardCharsets.UTF_8) +
+                "&redirect_uri=" + URLEncoder.encode(redirectUri, StandardCharsets.UTF_8) +
+                "&response_type=code" +
+                "&scope=" + URLEncoder.encode("account_info minecraft_server_session", StandardCharsets.UTF_8) +
+                "&code_challenge=" + URLEncoder.encode(challenge, StandardCharsets.UTF_8) +
+                "&code_challenge_method=S256";
+    }
+
+    /**
+     * Exchanges Ely.by OAuth2 Authorization Code for access & refresh tokens.
+     * Requires PKCE code_verifier generated earlier.
      */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MSTokens> msacToMsaMsr(@NotNull String code, @NotNull String redirect) {
-        String payload = "client_id=" + ELY_CLIENT_ID +
+        if (currentCodeVerifier == null) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("PKCE code_verifier is missing. Did you call generateCodeVerifier()?")
+            );
+        }
+
+        String payload = "client_id=" + URLEncoder.encode(ELY_CLIENT_ID, StandardCharsets.UTF_8) +
                 "&grant_type=authorization_code" +
                 "&code=" + URLEncoder.encode(code, StandardCharsets.UTF_8) +
-                "&redirect_uri=" + URLEncoder.encode(redirect, StandardCharsets.UTF_8);
+                "&redirect_uri=" + URLEncoder.encode(redirect, StandardCharsets.UTF_8) +
+                "&code_verifier=" + URLEncoder.encode(currentCodeVerifier, StandardCharsets.UTF_8);
 
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://account.ely.by/oauth2/v1/token"))
+                .uri(URI.create("https://account.ely.by/api/oauth2/v1/token"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -69,34 +132,44 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
+                String body = response.body();
+                
                 if (status != HttpURLConnection.HTTP_OK) {
-                    throw new IllegalArgumentException("Invalid status code from Ely.by: " + status + ", body: " + response.body());
+                    IAS.LOGGER.error("[Ely.by] Token exchange failed. Status: {}, Body: {}", status, body);
+                    throw new FriendlyException("Failed to login with Ely.by", "ias.error.elyby.token");
                 }
-                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
-                Objects.requireNonNull(json, "Response is null");
+                
+                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                Objects.requireNonNull(json, "Ely.by token response is null");
 
-                JsonObject dummy = new JsonObject();
-                dummy.addProperty("access_token", GSONUtils.getStringOrThrow(json, "access_token"));
-                dummy.addProperty("refresh_token", GSONUtils.getStringOrThrow(json, "refresh_token"));
-                return MSTokens.fromJson(dummy);
+                // Map Ely.by response to MSTokens format
+                JsonObject mapped = new JsonObject();
+                mapped.addProperty("access_token", GSONUtils.getStringOrThrow(json, "access_token"));
+                mapped.addProperty("refresh_token", GSONUtils.getStringOrThrow(json, "refresh_token"));
+                
+                // Clear code_verifier after successful exchange
+                currentCodeVerifier = null;
+                
+                return MSTokens.fromJson(mapped);
             } catch (Throwable t) {
+                IAS.LOGGER.error("[Ely.by] Failed to parse token response", t);
                 throw new RuntimeException("Unable to exchange Ely.by OAuth2 code.", t);
             }
         }, IAS.executor());
     }
 
     /**
-     * Refreshes Ely.by OAuth2 Token (Public Client style).
+     * Refreshes Ely.by OAuth2 Token.
      */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MSTokens> msrToMsaMsr(@NotNull String refresh) {
-        String payload = "client_id=" + ELY_CLIENT_ID +
+        String payload = "client_id=" + URLEncoder.encode(ELY_CLIENT_ID, StandardCharsets.UTF_8) +
                 "&grant_type=refresh_token" +
                 "&refresh_token=" + URLEncoder.encode(refresh, StandardCharsets.UTF_8);
 
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://account.ely.by/oauth2/v1/token"))
+                .uri(URI.create("https://account.ely.by/api/oauth2/v1/token"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -105,76 +178,81 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
+                String body = response.body();
+                
                 if (status != HttpURLConnection.HTTP_OK) {
+                    IAS.LOGGER.warn("[Ely.by] Token refresh failed. Status: {}", status);
                     throw new FriendlyException("Ely.by session expired.", "ias.error.session");
                 }
-                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
-                Objects.requireNonNull(json, "Response is null");
+                
+                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                Objects.requireNonNull(json, "Ely.by refresh response is null");
 
-                JsonObject dummy = new JsonObject();
-                dummy.addProperty("access_token", GSONUtils.getStringOrThrow(json, "access_token"));
-                dummy.addProperty("refresh_token", GSONUtils.getStringOrThrow(json, "refresh_token"));
-                return MSTokens.fromJson(dummy);
+                JsonObject mapped = new JsonObject();
+                mapped.addProperty("access_token", GSONUtils.getStringOrThrow(json, "access_token"));
+                mapped.addProperty("refresh_token", GSONUtils.getStringOrThrow(json, "refresh_token"));
+                
+                return MSTokens.fromJson(mapped);
             } catch (Throwable t) {
+                IAS.LOGGER.error("[Ely.by] Failed to refresh token", t);
                 throw new RuntimeException("Unable to refresh Ely.by OAuth2 token.", t);
             }
         }, IAS.executor());
     }
 
     /**
-     * Obtains user details from Ely.by and maps them to Minecraft Profile.
+     * Fetches Minecraft profile from Ely.by using access token.
      */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MCProfile> mcaToMcp(@NotNull String access) {
         return CLIENT.sendAsync(HttpRequest.newBuilder()
-                .uri(URI.create("https://account.ely.by/api/oauth2/v1/userinfo"))
+                .uri(URI.create("https://account.ely.by/api/account/v1/info"))
                 .header("User-Agent", IAS.USER_AGENT)
                 .header("Authorization", "Bearer " + access)
                 .timeout(IAS.TIMEOUT)
                 .GET()
-                .build(), HttpResponse.BodyHandlers.ofString()).thenComposeAsync(response -> {
+                .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
+                String body = response.body();
+                
                 if (status != HttpURLConnection.HTTP_OK) {
-                    throw new IllegalArgumentException("Invalid userinfo status: " + status);
+                    IAS.LOGGER.error("[Ely.by] Failed to fetch account info. Status: {}, Body: {}", status, body);
+                    throw new FriendlyException("Failed to get Ely.by profile", "ias.error.elyby.profile");
                 }
-                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
-                Objects.requireNonNull(json, "Response is null");
+                
+                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                Objects.requireNonNull(json, "Ely.by account info is null");
+                
+                // Ely.by returns: { "uuid": "...", "username": "...", ... }
+                String uuid = GSONUtils.getStringOrThrow(json, "uuid");
                 String username = GSONUtils.getStringOrThrow(json, "username");
-
-                return CLIENT.sendAsync(HttpRequest.newBuilder()
-                        .uri(URI.create("https://authserver.ely.by/api/users/profiles/minecraft/" + URLEncoder.encode(username, StandardCharsets.UTF_8)))
-                        .header("User-Agent", IAS.USER_AGENT)
-                        .timeout(IAS.TIMEOUT)
-                        .GET()
-                        .build(), HttpResponse.BodyHandlers.ofString());
+                
+                // Map to MCProfile format
+                JsonObject profile = new JsonObject();
+                profile.addProperty("id", uuid.replace("-", "")); // Remove dashes from UUID
+                profile.addProperty("name", username);
+                
+                IAS.LOGGER.info("[Ely.by] Logged in as: {} ({})", username, uuid);
+                
+                return MCProfile.fromJson(profile);
             } catch (Throwable t) {
-                throw new RuntimeException("Failed fetching userinfo from Ely.by.", t);
-            }
-        }, IAS.executor()).thenApplyAsync(response -> {
-            try {
-                int status = response.statusCode();
-                if (status != HttpURLConnection.HTTP_OK) {
-                    throw new IllegalArgumentException("Invalid profile status: " + status);
-                }
-                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
-                Objects.requireNonNull(json, "Response is null");
-                return MCProfile.fromJson(json);
-            } catch (Throwable t) {
-                throw new RuntimeException("Failed resolving profile from Ely.by.", t);
+                IAS.LOGGER.error("[Ely.by] Failed to parse account info", t);
+                throw new RuntimeException("Failed fetching profile from Ely.by.", t);
             }
         }, IAS.executor());
     }
 
-    // --- XBOX AUTH PASS-THROUGH BYPASSES ---
+    // --- XBOX AUTH BYPASS (Not used for Ely.by) ---
 
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<XHashedToken> msaToXbl(@NotNull String authToken) {
         try {
+            // Create dummy XBL token (Ely.by doesn't use Xbox Live)
             JsonObject xuiObj = new JsonObject();
-            xuiObj.addProperty("uhs", "dummy");
+            xuiObj.addProperty("uhs", "ely-bypass");
             JsonArray xui = new JsonArray();
             xui.add(xuiObj);
             JsonObject displayClaims = new JsonObject();
@@ -191,15 +269,18 @@ public final class MSAuth {
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<XHashedToken> xblToXsts(@NotNull String xbl, @Nullable String hash) {
-        return msaToXbl(xbl);
+        return msaToXbl(xbl); // Pass-through
     }
 
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<String> xstsToMca(@NotNull String xsts, @NotNull String hash) {
-        return CompletableFuture.completedFuture(xsts);
+        return CompletableFuture.completedFuture(xsts); // Pass-through
     }
 
+    /**
+     * Resolves Minecraft profile by username from Ely.by.
+     */
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<MCProfile> nameToMcp(@NotNull String name) {
@@ -211,24 +292,36 @@ public final class MSAuth {
                 .build(), HttpResponse.BodyHandlers.ofString()).thenApplyAsync(response -> {
             try {
                 int status = response.statusCode();
+                String body = response.body();
+                
+                if (status == HttpURLConnection.HTTP_NO_CONTENT || status == HttpURLConnection.HTTP_NOT_FOUND) {
+                    throw new FriendlyException("Ely.by profile not found: " + name, "ias.error.elyby.notfound");
+                }
+                
                 if (status != HttpURLConnection.HTTP_OK) {
+                    IAS.LOGGER.error("[Ely.by] Failed to resolve profile. Status: {}, Body: {}", status, body);
                     throw new IllegalArgumentException("Invalid profile status: " + status);
                 }
-                JsonObject json = GSONUtils.GSON.fromJson(response.body(), JsonObject.class);
-                Objects.requireNonNull(json, "Response is null");
+                
+                JsonObject json = GSONUtils.GSON.fromJson(body, JsonObject.class);
+                Objects.requireNonNull(json, "Ely.by profile response is null");
+                
                 return MCProfile.fromJson(json);
             } catch (Throwable t) {
+                IAS.LOGGER.error("[Ely.by] Failed to resolve profile by name: {}", name, t);
                 throw new RuntimeException("Unable to resolve Ely.by profile by name: " + name, t);
             }
         }, IAS.executor());
     }
 
-    // --- DISABLED CLIENT FLOWS ---
+    // --- DISABLED FLOWS ---
 
     @CheckReturnValue
     @NotNull
     public static CompletableFuture<DeviceAuth> requestDac() {
-        return CompletableFuture.failedFuture(new UnsupportedOperationException("Device Code flow is not supported by Ely.by."));
+        return CompletableFuture.failedFuture(
+            new UnsupportedOperationException("Device Code flow is not supported by Ely.by.")
+        );
     }
 
     @CheckReturnValue
